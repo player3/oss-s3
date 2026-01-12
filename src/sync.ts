@@ -1,6 +1,6 @@
 import { Upload } from '@aws-sdk/lib-storage';
 import { config } from './config';
-import { ossClient, s3Client, listAllOssFiles, listAllS3Files } from './utils';
+import { ossClient, s3Client, listAllOssFiles, listAllS3Files, formatBytes } from './utils';
 import chalk from 'chalk';
 import cliProgress from 'cli-progress';
 import { CheckpointManager } from './checkpoint';
@@ -34,16 +34,48 @@ export async function sync() {
     let skipCount = 0;
     let failCount = 0;
 
-    const progressBar = new cliProgress.SingleBar({
-      format: 'Syncing |' + chalk.cyan('{bar}') + '| {percentage}% || {value}/{total} Files || ETA: {eta_formatted} || {status}',
-      barCompleteChar: '\u2588',
-      barIncompleteChar: '\u2591',
-      hideCursor: true
+    const multiBar = new cliProgress.MultiBar({
+      clearOnComplete: false,
+      hideCursor: true,
+      format: '{bar} | {percentage}% | {value}/{total} | {data}',
     }, cliProgress.Presets.shades_classic);
 
-    progressBar.start(ossFiles.size, 0, {
-      status: 'Starting...'
+    const totalBar = multiBar.create(ossFiles.size, 0, {
+      data: 'Starting...'
     });
+    
+    // Format: [Bar] 50% | filename | 5MB/10MB | 1MB/s
+    const fileBar = multiBar.create(100, 0, {
+      data: 'Waiting...'
+    });
+    
+    // Customize fileBar format to include filename and speed
+    // We update the format dynamically or use a generic payload '{data}'
+    // Let's use a specific format for fileBar if possible, but MultiBar shares options usually?
+    // Actually MultiBar.create takes options.
+    // Let's rely on the generic 'format' defined in MultiBar constructor but use 'data' heavily,
+    // OR just use a wide 'data' field.
+    // Better: Define specific format for each bar?
+    // cli-progress 3.x MultiBar create() signature: create(total, startValue, payload, options)
+    
+    // Re-create bars with specific formats
+    multiBar.remove(totalBar);
+    multiBar.remove(fileBar);
+
+    const mainBar = multiBar.create(ossFiles.size, 0, {
+      status: 'Starting...'
+    }, {
+      format: 'Total:  ' + chalk.cyan('{bar}') + ' {percentage}% | {value}/{total} Files | ETA: {eta_formatted} | {status}'
+    });
+
+    const currentFileBar = multiBar.create(0, 0, {
+      filename: 'Waiting...',
+      transfer: '0/0',
+      speed: '0/0',
+    }, {
+      format: 'Current: ' + chalk.green('{bar}') + ' {percentage}% | {filename} | {transfer} | {speed}'
+    });
+
 
     let processedFiles = 0;
 
@@ -54,22 +86,28 @@ export async function sync() {
         if (s3Size === size) {
           skipCount++;
           processedFiles++;
-          progressBar.increment(1, {
+          mainBar.increment(1, {
             status: chalk.gray(`Skipped: ${fileName}`)
           });
           continue;
         } else {
-          progressBar.update(processedFiles, {
+          mainBar.update(processedFiles, {
             status: chalk.yellow(`Updating: ${fileName}`)
           });
         }
       } else {
-        progressBar.update(processedFiles, {
+        mainBar.update(processedFiles, {
           status: chalk.yellow(`Syncing: ${fileName}`)
         });
       }
 
       try {
+        currentFileBar.start(size, 0, {
+            filename: fileName,
+            transfer: `0 / ${formatBytes(size)}`,
+            speed: '0 B/s'
+        });
+
         // Get stream from OSS
         const result = await ossClient.getStream(fileName);
         const stream = result.stream;
@@ -85,35 +123,66 @@ export async function sync() {
           },
         });
 
+        let lastLoaded = 0;
+        let lastTime = Date.now();
+        
+        upload.on('httpUploadProgress', (progress) => {
+          if (progress.loaded) {
+            const now = Date.now();
+            const delta = now - lastTime;
+            
+            // Update speed every 500ms or so to avoid flickering? 
+            // Or just every event (events might be frequent)
+            if (delta > 500 || progress.loaded === progress.total) {
+                const loadedDelta = progress.loaded - lastLoaded;
+                const speed = (loadedDelta / delta) * 1000; // bytes per second
+                
+                currentFileBar.update(progress.loaded, {
+                    transfer: `${formatBytes(progress.loaded)} / ${formatBytes(size)}`,
+                    speed: `${formatBytes(speed)}/s`
+                });
+                
+                lastLoaded = progress.loaded;
+                lastTime = now;
+            } else {
+                 currentFileBar.update(progress.loaded, {
+                    transfer: `${formatBytes(progress.loaded)} / ${formatBytes(size)}`
+                });
+            }
+          }
+        });
+
         await upload.done();
+        
+        currentFileBar.update(size, {
+            transfer: `${formatBytes(size)} / ${formatBytes(size)}`,
+            speed: 'Done'
+        });
+        
         successCount++;
         processedFiles++;
+        
         // Update checkpoint
         checkpointManager.appendJournal(fileName, size);
-        s3Files.set(fileName, size); // Update memory map too for consistency
+        s3Files.set(fileName, size);
         
-        progressBar.increment(1, {
+        mainBar.increment(1, {
           status: chalk.green(`Synced: ${fileName}`)
         });
+        
       } catch (err: any) {
         failCount++;
         processedFiles++;
-        progressBar.increment(1, {
+        mainBar.increment(1, {
           status: chalk.red(`Failed: ${fileName}`)
         });
+        // Log error below bars
+        multiBar.log(chalk.red(`\n✗ Failed to sync ${fileName}: ${err.message}\n`));
       }
     }
 
-    progressBar.stop();
+    multiBar.stop();
     
-    // Only clear checkpoint if everything succeeded? 
-    // Or if we finished the loop?
-    // If we finished the loop, we processed everything we knew about.
-    // If there were failures, we might want to keep the checkpoint to retry failures?
-    // But failures are counted. If we re-run, we probably want to re-list to see if they were fixed?
-    // Actually, if we finish the loop, we should probably clear the checkpoint so next run is fresh.
-    // Unless there were failures?
-    // Standard "Resume" logic: If we finished the iteration, the "job" is done.
     if (failCount === 0) {
         checkpointManager.clear();
     } else {
