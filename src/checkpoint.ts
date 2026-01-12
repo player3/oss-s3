@@ -17,6 +17,10 @@ export class CheckpointManager {
   }
 
   saveSnapshot(ossFiles: Map<string, number>, s3Files: Map<string, number>) {
+    if (!fs.existsSync(SYNC_DIR)) {
+      fs.mkdirSync(SYNC_DIR, { recursive: true });
+    }
+
     const data: Snapshot = {
       timestamp: Date.now(),
       ossFiles: Array.from(ossFiles.entries()),
@@ -64,6 +68,9 @@ export class CheckpointManager {
   }
 
   appendJournal(fileName: string, size: number) {
+    if (!fs.existsSync(SYNC_DIR)) {
+      fs.mkdirSync(SYNC_DIR, { recursive: true });
+    }
     fs.appendFileSync(JOURNAL_FILE, `${fileName}::${size}\n`);
   }
 
