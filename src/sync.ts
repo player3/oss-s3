@@ -16,6 +16,7 @@ export async function sync() {
     const loaded = checkpointManager.loadSnapshot();
     if (loaded) {
       console.log(chalk.cyan('Found unfinished sync checkpoint. Resuming...'));
+      console.log(chalk.cyan(`Restored ${loaded.restoredCount} completed files from journal.`));
       ossFiles = loaded.ossFiles;
       s3Files = loaded.s3Files;
     } else {

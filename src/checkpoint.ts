@@ -33,7 +33,7 @@ export class CheckpointManager {
     }
   }
 
-  loadSnapshot(): { ossFiles: Map<string, number>, s3Files: Map<string, number> } | null {
+  loadSnapshot(): { ossFiles: Map<string, number>, s3Files: Map<string, number>, restoredCount: number } | null {
     if (!this.hasCheckpoint()) return null;
 
     try {
@@ -42,6 +42,7 @@ export class CheckpointManager {
       
       const ossFiles = new Map<string, number>(data.ossFiles);
       const s3Files = new Map<string, number>(data.s3Files);
+      let restoredCount = 0;
 
       // Replay journal
       if (fs.existsSync(JOURNAL_FILE)) {
@@ -53,6 +54,7 @@ export class CheckpointManager {
             const [fileName, sizeStr] = line.split('::');
             if (fileName && sizeStr) {
               s3Files.set(fileName, parseInt(sizeStr, 10));
+              restoredCount++;
             }
           } catch (e) {
             // Ignore bad lines
@@ -60,7 +62,7 @@ export class CheckpointManager {
         }
       }
 
-      return { ossFiles, s3Files };
+      return { ossFiles, s3Files, restoredCount };
     } catch (error) {
       console.error('Failed to load checkpoint:', error);
       return null;
