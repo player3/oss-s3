@@ -2,7 +2,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { config } from './config';
 import { ossClient, s3Client, formatBytes } from './utils';
 import chalk from 'chalk';
-import { Readable } from 'stream';
+import { Readable, PassThrough } from 'stream';
 
 export async function copyback(fileKey: string) {
   console.log(chalk.blue(`Copying file from S3 to OSS: ${fileKey}`));
@@ -26,34 +26,41 @@ export async function copyback(fileKey: string) {
     console.log(chalk.gray(`File size: ${formatBytes(contentLength)}`));
     console.log(chalk.gray(`Content-Type: ${contentType}`));
 
-    // Convert S3 stream to buffer for OSS upload
-    const stream = response.Body as Readable;
-    const chunks: Buffer[] = [];
+    // Create a pass-through stream with progress tracking
+    const s3Stream = response.Body as Readable;
+    const passThrough = new PassThrough();
 
-    let downloaded = 0;
+    let transferred = 0;
+    let lastTime = Date.now();
+    let lastTransferred = 0;
 
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-      downloaded += chunk.length;
-      const percent = contentLength > 0 ? Math.round((downloaded / contentLength) * 100) : 0;
-      process.stdout.write(`\rDownloading from S3: ${formatBytes(downloaded)} / ${formatBytes(contentLength)} (${percent}%)`);
-    }
-    console.log(); // New line after progress
+    s3Stream.on('data', (chunk: Buffer) => {
+      transferred += chunk.length;
+      const now = Date.now();
+      const delta = now - lastTime;
 
-    const buffer = Buffer.concat(chunks);
-
-    // Upload to OSS
-    console.log(chalk.gray('Uploading to OSS...'));
-
-    await ossClient.put(fileKey, buffer, {
-      headers: {
-        'Content-Type': contentType,
-      },
+      if (delta > 500 || transferred === contentLength) {
+        const speed = delta > 0 ? ((transferred - lastTransferred) / delta) * 1000 : 0;
+        const percent = contentLength > 0 ? Math.round((transferred / contentLength) * 100) : 0;
+        process.stdout.write(`\rTransferring: ${formatBytes(transferred)} / ${formatBytes(contentLength)} (${percent}%) | ${formatBytes(speed)}/s`);
+        lastTime = now;
+        lastTransferred = transferred;
+      }
     });
 
+    s3Stream.pipe(passThrough);
+
+    // Stream directly to OSS (no buffering)
+    await ossClient.putStream(fileKey, passThrough, {
+      contentLength,
+      mime: contentType,
+    } as any);
+
+    console.log(); // New line after progress
     console.log(chalk.green(`✓ Successfully copied ${fileKey} from S3 to OSS`));
 
   } catch (err: any) {
+    console.log(); // New line in case of error during progress
     if (err.name === 'NoSuchKey') {
       console.error(chalk.red(`✗ File not found in S3: ${fileKey}`));
     } else {
