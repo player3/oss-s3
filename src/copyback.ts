@@ -51,9 +51,13 @@ export async function copyback(fileKey: string) {
     s3Stream.pipe(passThrough);
 
     // Stream directly to OSS (no buffering)
+    // Set timeout based on file size: min 10 minutes, or 1 minute per 100MB
+    const timeoutMs = Math.max(10 * 60 * 1000, Math.ceil(contentLength / (100 * 1024 * 1024)) * 60 * 1000);
+
     await ossClient.putStream(fileKey, passThrough, {
       contentLength,
       mime: contentType,
+      timeout: timeoutMs,
     } as any);
 
     console.log(); // New line after progress
