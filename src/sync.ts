@@ -1,3 +1,4 @@
+import { HeadObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { config } from './config';
 import { ossClient, s3Client, listAllOssFiles, listAllS3Files, formatBytes } from './utils';
@@ -5,7 +6,114 @@ import chalk from 'chalk';
 import cliProgress from 'cli-progress';
 import { CheckpointManager } from './checkpoint';
 
-export async function sync() {
+async function syncSingleFile(fileKey: string) {
+  console.log(chalk.blue(`Starting single file sync: ${fileKey}`));
+
+  let ossSize = 0;
+  try {
+    const headResult = await ossClient.head(fileKey);
+    const contentLength = (headResult.res as any)?.headers?.['content-length'];
+    ossSize = contentLength ? Number(contentLength) : 0;
+  } catch (error: any) {
+    console.error(chalk.red(`Failed to access OSS file ${fileKey}: ${error.message}`));
+    return;
+  }
+
+  let s3Size: number | null = null;
+  try {
+    const headCommand = new HeadObjectCommand({
+      Bucket: config.aws.bucket,
+      Key: fileKey,
+    });
+    const headResponse = await s3Client.send(headCommand);
+    if (typeof headResponse.ContentLength === 'number') {
+      s3Size = headResponse.ContentLength;
+    }
+  } catch (error: any) {
+    const statusCode = error?.$metadata?.httpStatusCode;
+    if (statusCode !== 404 && error?.name !== 'NotFound' && error?.Code !== 'NotFound') {
+      console.warn(chalk.yellow(`Warning: could not check S3 size for ${fileKey}: ${error.message}`));
+    }
+  }
+
+  if (s3Size !== null && s3Size === ossSize) {
+    console.log(chalk.gray(`Skipped: ${fileKey} (already up to date)`));
+    return;
+  }
+
+  const totalSize = Math.max(ossSize, 1);
+  const progressBar = new cliProgress.SingleBar({
+    clearOnComplete: false,
+    hideCursor: true,
+    format: 'Current: ' + chalk.green('{bar}') + ' {percentage}% | {filename} | {transfer} | {speed}',
+  }, cliProgress.Presets.shades_classic);
+
+  try {
+    progressBar.start(totalSize, 0, {
+      filename: fileKey,
+      transfer: `0 / ${formatBytes(ossSize)}`,
+      speed: '0 B/s',
+    });
+
+    const result = await ossClient.getStream(fileKey);
+    const stream = result.stream;
+
+    const upload = new Upload({
+      client: s3Client,
+      params: {
+        Bucket: config.aws.bucket,
+        Key: fileKey,
+        Body: stream,
+        ContentType: (result.res as any).headers['content-type'],
+      },
+    });
+
+    let lastLoaded = 0;
+    let lastTime = Date.now();
+
+    upload.on('httpUploadProgress', (progress) => {
+      if (progress.loaded) {
+        const now = Date.now();
+        const delta = now - lastTime;
+
+        if (delta > 500 || progress.loaded === progress.total) {
+          const loadedDelta = progress.loaded - lastLoaded;
+          const speed = (loadedDelta / delta) * 1000;
+
+          progressBar.update(Math.min(progress.loaded, totalSize), {
+            transfer: `${formatBytes(progress.loaded)} / ${formatBytes(ossSize)}`,
+            speed: `${formatBytes(speed)}/s`,
+          });
+
+          lastLoaded = progress.loaded;
+          lastTime = now;
+        } else {
+          progressBar.update(Math.min(progress.loaded, totalSize), {
+            transfer: `${formatBytes(progress.loaded)} / ${formatBytes(ossSize)}`,
+          });
+        }
+      }
+    });
+
+    await upload.done();
+
+    progressBar.update(totalSize, {
+      transfer: `${formatBytes(ossSize)} / ${formatBytes(ossSize)}`,
+      speed: 'Done',
+    });
+    progressBar.stop();
+    console.log(chalk.green(`Synced: ${fileKey}`));
+  } catch (error: any) {
+    progressBar.stop();
+    console.error(chalk.red(`Failed to sync ${fileKey}: ${error.message}`));
+  }
+}
+
+export async function sync(fileKey?: string) {
+  if (fileKey) {
+    await syncSingleFile(fileKey);
+    return;
+  }
   console.log(chalk.blue('Starting sync process...'));
   
   const checkpointManager = new CheckpointManager();

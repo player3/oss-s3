@@ -8,15 +8,16 @@ async function main() {
   checkConfig();
 
   const command = process.argv[2];
+  const fileKey = process.argv[3];
 
   if (!command) {
-    console.log(chalk.red('Please provide a command: sync, verify, all, or copyback <file>'));
+    console.log(chalk.red('Please provide a command: sync [file], verify, all, or copyback <file>'));
     process.exit(1);
   }
 
   switch (command) {
     case 'sync':
-      await sync();
+      await sync(fileKey);
       break;
     case 'verify':
       await verify();
@@ -27,7 +28,6 @@ async function main() {
       await verify();
       break;
     case 'copyback':
-      const fileKey = process.argv[3];
       if (!fileKey) {
         console.log(chalk.red('Please provide a file key for copyback command'));
         console.log('Usage: copyback <file-key>');
@@ -37,7 +37,7 @@ async function main() {
       break;
     default:
       console.log(chalk.red(`Unknown command: ${command}`));
-      console.log('Available commands: sync, verify, all, copyback <file>');
+      console.log('Available commands: sync [file], verify, all, copyback <file>');
       process.exit(1);
   }
 }
